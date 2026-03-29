@@ -1,0 +1,203 @@
+using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.VisualStudio.TestTools.UnitTesting;
+using Moq;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
+using VacationManager.Controllers;
+using VacationManager.Data;
+using VacationManager.Models;
+using Microsoft.EntityFrameworkCore;
+
+namespace VacationManager.Tests
+{
+    [TestClass]
+    public class UsersControllerTests
+    {
+        private Mock<UserManager<ApplicationUser>> _userManagerMock = null!;
+        private VacationManagerDbContext _context = null!;
+        private UsersController _controller = null!;
+
+        [TestInitialize]
+        public void Setup()
+        {
+            // Използваме уникално име за всеки тест, за да избегнем дублиране на данни
+            var options = new DbContextOptionsBuilder<VacationManagerDbContext>()
+                .UseInMemoryDatabase(databaseName: Guid.NewGuid().ToString())
+                .Options;
+
+            _context = new VacationManagerDbContext(options);
+
+            var store = new Mock<IUserStore<ApplicationUser>>();
+            _userManagerMock = new Mock<UserManager<ApplicationUser>>(
+                store.Object, null!, null!, null!, null!, null!, null!, null!, null!);
+
+            _controller = new UsersController(_userManagerMock.Object, _context);
+        }
+
+        [TestCleanup]
+        public void Cleanup()
+        {
+            _context.Database.EnsureDeleted();
+            _context.Dispose();
+        }
+
+        [TestMethod]
+        public async Task Index_ReturnsViewWithUsers()
+        {
+            // Arrange
+            var users = new List<ApplicationUser>
+            {
+                new ApplicationUser { UserName = "testuser1", FirstName = "Test", LastName = "User", Email = "t1@test.com" },
+                new ApplicationUser { UserName = "testuser2", FirstName = "Another", LastName = "User", Email = "t2@test.com" }
+            };
+            await _context.Users.AddRangeAsync(users);
+            await _context.SaveChangesAsync();
+
+            // Act
+            var result = await _controller.Index(null, 1, 10) as ViewResult;
+
+            // Assert
+            Assert.IsNotNull(result);
+            var model = result.Model as List<ApplicationUser>;
+            Assert.IsNotNull(model);
+            Assert.AreEqual(2, model.Count);
+        }
+
+        [TestMethod]
+        public async Task Index_Search_ReturnsFilteredUsers()
+        {
+            // Arrange
+            var users = new List<ApplicationUser>
+            {
+                new ApplicationUser { UserName = "testuser1", FirstName = "Test", LastName = "User" },
+                new ApplicationUser { UserName = "testuser2", FirstName = "Another", LastName = "User" }
+            };
+            await _context.Users.AddRangeAsync(users);
+            await _context.SaveChangesAsync();
+
+            // Act
+            var result = await _controller.Index("Another", 1, 10) as ViewResult;
+
+            // Assert
+            Assert.IsNotNull(result);
+            var model = result.Model as List<ApplicationUser>;
+            Assert.IsNotNull(model);
+            Assert.AreEqual(1, model.Count);
+            Assert.AreEqual("testuser2", model.First().UserName);
+        }
+
+        [TestMethod]
+        public async Task Details_ReturnsViewWithUser_IfExists()
+        {
+            // Arrange
+            var user = new ApplicationUser { Id = "1", UserName = "testuser1", FirstName = "F", LastName = "L" };
+            await _context.Users.AddAsync(user);
+            await _context.SaveChangesAsync();
+
+            // Act
+            var result = await _controller.Details("1") as ViewResult;
+
+            // Assert
+            Assert.IsNotNull(result);
+            var model = result.Model as ApplicationUser;
+            Assert.AreEqual("testuser1", model?.UserName);
+        }
+
+        [TestMethod]
+        public async Task Details_ReturnsNotFound_IfNotExists()
+        {
+            // Act
+            var result = await _controller.Details("unknown");
+
+            // Assert
+            Assert.IsInstanceOfType(result, typeof(NotFoundResult));
+        }
+
+        [TestMethod]
+        public async Task Create_Post_ShouldCreateUser_IfValidModel()
+        {
+            // Arrange
+            var user = new ApplicationUser { UserName = "newuser", FirstName = "New", LastName = "User", Email = "new@test.com" };
+            _userManagerMock.Setup(x => x.CreateAsync(It.IsAny<ApplicationUser>(), It.IsAny<string>()))
+                .ReturnsAsync(IdentityResult.Success);
+
+            // Act
+            var result = await _controller.Create(user, "password123!") as RedirectToActionResult;
+
+            // Assert
+            Assert.IsNotNull(result);
+            Assert.AreEqual("Index", result.ActionName);
+            _userManagerMock.Verify(x => x.CreateAsync(It.IsAny<ApplicationUser>(), It.IsAny<string>()), Times.Once);
+        }
+
+        [TestMethod]
+        public async Task Edit_Get_ShouldReturnViewWithUser()
+        {
+            // Arrange
+            var user = new ApplicationUser { Id = "edit-1", UserName = "edituser", FirstName = "F", LastName = "L" };
+            await _context.Users.AddAsync(user);
+            await _context.SaveChangesAsync();
+
+            // Act
+            var result = await _controller.Edit("edit-1") as ViewResult;
+
+            // Assert
+            Assert.IsNotNull(result);
+            var model = result.Model as ApplicationUser;
+            Assert.AreEqual("edituser", model?.UserName);
+        }
+
+        [TestMethod]
+        public async Task Edit_Post_ShouldUpdateUser_IfValidModel()
+        {
+            // Arrange
+            var user = new ApplicationUser { Id = "u1", UserName = "edituser", FirstName = "Old", LastName = "Old" };
+            await _context.Users.AddAsync(user);
+            await _context.SaveChangesAsync();
+
+            // Откачаме обекта от проследяване, за да можем да го подадем като нов в Edit
+            _context.Entry(user).State = EntityState.Detached;
+
+            var updatedUser = new ApplicationUser { Id = "u1", UserName = "edituser", FirstName = "NewFirstName", LastName = "NewLastName" };
+
+            // Act
+            var result = await _controller.Edit(updatedUser) as RedirectToActionResult;
+
+            // Assert
+            Assert.IsNotNull(result);
+            Assert.AreEqual("Index", result.ActionName);
+
+            var editedUserInDb = await _context.Users.FindAsync("u1");
+            Assert.AreEqual("NewFirstName", editedUserInDb?.FirstName);
+        }
+
+        [TestMethod]
+        public async Task Delete_ShouldRemoveUser_IfExists()
+        {
+            // Arrange
+            var user = new ApplicationUser { Id = "del-1", UserName = "deleteuser", FirstName = "F", LastName = "L" };
+            await _context.Users.AddAsync(user);
+            await _context.SaveChangesAsync();
+
+            _userManagerMock.Setup(x => x.FindByIdAsync("del-1")).ReturnsAsync(user);
+            _userManagerMock.Setup(x => x.DeleteAsync(It.IsAny<ApplicationUser>()))
+                .ReturnsAsync(IdentityResult.Success)
+                .Callback<ApplicationUser>(u => {
+                    _context.Users.Remove(u);
+                    _context.SaveChanges();
+                });
+
+            // Act
+            var result = await _controller.Delete("del-1") as RedirectToActionResult;
+
+            // Assert
+            Assert.IsNotNull(result);
+            Assert.AreEqual("Index", result.ActionName);
+            var deletedUser = await _context.Users.FindAsync("del-1");
+            Assert.IsNull(deletedUser);
+        }
+    }
+}
