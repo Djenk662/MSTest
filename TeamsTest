@@ -1,0 +1,200 @@
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.VisualStudio.TestTools.UnitTesting;
+using Moq;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Security.Claims;
+using System.Threading.Tasks;
+using VacationManager.Controllers;
+using VacationManager.Data;
+using VacationManager.Models;
+
+namespace VacationManager.Tests
+{
+    [TestClass]
+    public class TeamsControllerTests
+    {
+        private TeamsController _controller = null!;
+        private Mock<UserManager<ApplicationUser>> _userManagerMock = null!;
+        private VacationManagerDbContext _context = null!;
+        private ClaimsPrincipal _userPrincipal = null!;
+        private const string TestUserId = "test-user-id";
+
+        [TestInitialize]
+        public void Setup()
+        {
+            // Използваме нов Guid за име на базата при всеки тест, за да няма застъпване на данни
+            var options = new DbContextOptionsBuilder<VacationManagerDbContext>()
+                .UseInMemoryDatabase(databaseName: Guid.NewGuid().ToString())
+                .Options;
+
+            _context = new VacationManagerDbContext(options);
+
+            var store = new Mock<IUserStore<ApplicationUser>>();
+            _userManagerMock = new Mock<UserManager<ApplicationUser>>(
+                store.Object, null!, null!, null!, null!, null!, null!, null!, null!);
+
+            // Идентичност за CEO потребител
+            var claims = new[] {
+                new Claim(ClaimTypes.NameIdentifier, TestUserId),
+                new Claim(ClaimTypes.Role, "CEO")
+            };
+            var identity = new ClaimsIdentity(claims, "TestAuth");
+            _userPrincipal = new ClaimsPrincipal(identity);
+
+            _controller = new TeamsController(_context, _userManagerMock.Object);
+            _controller.ControllerContext = new ControllerContext()
+            {
+                HttpContext = new DefaultHttpContext() { User = _userPrincipal }
+            };
+        }
+
+        [TestCleanup]
+        public void Cleanup()
+        {
+            _context.Database.EnsureDeleted();
+            _context.Dispose();
+        }
+
+        [TestMethod]
+        public async Task Index_ShouldReturnViewResult_WithListOfTeams_ForCEO()
+        {
+            // Arrange
+            // 1. Първо създаваме проекта и лидерите, защото са задължителни за Include()
+            var project = new Project { Id = 500, Name = "Base Project", Description = "Required Description" };
+            _context.Projects.Add(project);
+
+            var lead1 = new ApplicationUser { Id = "L1", FirstName = "Lead", LastName = "One", Email = "l1@test.com", UserName = "l1@test.com" };
+            var lead2 = new ApplicationUser { Id = "L2", FirstName = "Lead", LastName = "Two", Email = "l2@test.com", UserName = "l2@test.com" };
+            _context.Users.AddRange(lead1, lead2);
+            await _context.SaveChangesAsync();
+
+            // 2. Добавяме отборите
+            _context.Teams.Add(new Team { Id = 101, Name = "Team1", TeamLeadId = "L1", ProjectId = 500 });
+            _context.Teams.Add(new Team { Id = 102, Name = "Team2", TeamLeadId = "L2", ProjectId = 500 });
+            await _context.SaveChangesAsync();
+
+            // 3. Настройваме UserManager
+            var user = new ApplicationUser { Id = TestUserId, FirstName = "CEO", LastName = "User" };
+            _userManagerMock.Setup(m => m.GetUserAsync(It.IsAny<ClaimsPrincipal>())).ReturnsAsync(user);
+            _userManagerMock.Setup(m => m.IsInRoleAsync(user, "CEO")).ReturnsAsync(true);
+
+            // Act
+            var result = await _controller.Index();
+
+            // Assert
+            var viewResult = result as ViewResult;
+            Assert.IsNotNull(viewResult, "Index не върна ViewResult");
+            var model = viewResult.Model as IEnumerable<Team>;
+            Assert.IsNotNull(model, "Моделът е null");
+            Assert.AreEqual(2, model.Count(), "Броят на отборите в Index не е 2");
+        }
+
+        [TestMethod]
+        public async Task Details_ShouldReturnViewResult_WhenTeamExists()
+        {
+            // Arrange
+            var project = new Project { Id = 600, Name = "P", Description = "D" };
+            var lead = new ApplicationUser { Id = "L3", FirstName = "F", LastName = "L" };
+            _context.Projects.Add(project);
+            _context.Users.Add(lead);
+            var team = new Team { Id = 1, Name = "TeamX", ProjectId = 600, TeamLeadId = "L3" };
+            _context.Teams.Add(team);
+            await _context.SaveChangesAsync();
+
+            // Act
+            var result = await _controller.Details(1);
+
+            // Assert
+            Assert.IsInstanceOfType(result, typeof(ViewResult));
+        }
+
+        [TestMethod]
+        public async Task Create_Post_ShouldAddTeamAndRedirect_WhenModelIsValid()
+        {
+            // Arrange 
+            var project = new Project { Id = 800, Name = "Project for Create", Description = "Desc" };
+            _context.Projects.Add(project);
+
+            var lead = new ApplicationUser { Id = "lead123", FirstName = "T", LastName = "L" };
+            _context.Users.Add(lead);
+            await _context.SaveChangesAsync();
+
+            var team = new Team
+            {
+                Name = "Brand New Team",
+                ProjectId = 800,
+                TeamLeadId = "lead123"
+            };
+
+            // Act
+            var result = await _controller.Create(team);
+
+            // Assert
+            Assert.IsInstanceOfType(result, typeof(RedirectToActionResult));
+            Assert.IsTrue(_context.Teams.Any(), "Отборът не е записан в базата данни.");
+        }
+
+        [TestMethod]
+        public async Task Edit_Post_ShouldSaveChangesAndRedirect_WhenModelIsValid()
+        {
+            // Arrange 
+            var team = new Team { Id = 200, Name = "Original Name", ProjectId = 1, TeamLeadId = "L1" };
+            _context.Teams.Add(team);
+            await _context.SaveChangesAsync();
+
+            // Act
+            team.Name = "Updated Name";
+            var result = await _controller.Edit(team.Id, team);
+
+            // Assert
+            Assert.IsInstanceOfType(result, typeof(RedirectToActionResult));
+            var updatedTeam = await _context.Teams.FindAsync(200);
+            Assert.AreEqual("Updated Name", updatedTeam?.Name);
+        }
+
+        [TestMethod]
+        public async Task AssignUser_Post_ShouldAssignUserToTeamAndRedirect_WhenUserExists()
+        {
+            // Arrange 
+            var user = new ApplicationUser
+            {
+                Id = "u-assign",
+                FirstName = "Ivan",
+                LastName = "Ivanov",
+                Email = "i@test.com",
+                UserName = "i@test.com"
+            };
+            _context.Users.Add(user);
+            await _context.SaveChangesAsync();
+
+            // Act
+            var result = await _controller.AssignUser("u-assign", 5);
+
+            // Assert
+            var updatedUser = await _context.Users.FindAsync("u-assign");
+            Assert.AreEqual(5, updatedUser?.TeamId);
+            Assert.IsInstanceOfType(result, typeof(RedirectToActionResult));
+        }
+
+        [TestMethod]
+        public async Task DeleteConfirmed_ShouldRemoveTeamAndRedirect_WhenTeamExists()
+        {
+            // Arrange
+            var team = new Team { Id = 300, Name = "To Delete", TeamLeadId = "L1" };
+            _context.Teams.Add(team);
+            await _context.SaveChangesAsync();
+
+            // Act 
+            var result = await _controller.DeleteConfirmed(300);
+
+            // Assert
+            Assert.IsInstanceOfType(result, typeof(RedirectToActionResult));
+            Assert.IsFalse(_context.Teams.Any(t => t.Id == 300));
+        }
+    }
+}
