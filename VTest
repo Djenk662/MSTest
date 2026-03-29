@@ -1,0 +1,211 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Security.Claims;
+using System.Threading.Tasks;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.Rendering;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.VisualStudio.TestTools.UnitTesting;
+using Moq;
+using VacationManager.Controllers;
+using VacationManager.Data;
+using VacationManager.Models;
+
+namespace VacationManager.UnitTests
+{
+    [TestClass]
+    public class VacationRequestsControllerTests
+    {
+        private VacationManagerDbContext _context;
+        private Mock<UserManager<ApplicationUser>> _mockUserManager;
+        private ClaimsPrincipal _userPrincipal;
+        private const string TestUserId = "user1";
+
+        [TestInitialize]
+        public void TestInitialize()
+        {
+            // Използваме InMemory база вместо Mock на DbContext
+            var options = new DbContextOptionsBuilder<VacationManagerDbContext>()
+                .UseInMemoryDatabase(databaseName: Guid.NewGuid().ToString())
+                .Options;
+
+            _context = new VacationManagerDbContext(options);
+
+            var store = new Mock<IUserStore<ApplicationUser>>();
+            _mockUserManager = new Mock<UserManager<ApplicationUser>>(
+                store.Object, null, null, null, null, null, null, null, null);
+
+            // Настройка на тестов потребител за контролера
+            var claims = new[] { new Claim(ClaimTypes.NameIdentifier, TestUserId) };
+            var identity = new ClaimsIdentity(claims, "TestAuth");
+            _userPrincipal = new ClaimsPrincipal(identity);
+        }
+
+        [TestCleanup]
+        public void Cleanup()
+        {
+            _context.Database.EnsureDeleted();
+            _context.Dispose();
+        }
+
+        private VacationRequestsController CreateController()
+        {
+            var controller = new VacationRequestsController(_context, _mockUserManager.Object);
+            controller.ControllerContext = new ControllerContext()
+            {
+                HttpContext = new DefaultHttpContext() { User = _userPrincipal }
+            };
+            return controller;
+        }
+
+        [TestMethod]
+        public async Task MyRequests_ReturnsView_WithUserRequests()
+        {
+            // Arrange
+            var user = new ApplicationUser { Id = TestUserId };
+            var vType = new VacationType { Id = 1, Name = "Annual" };
+            _context.VacationTypes.Add(vType);
+            _context.VacationRequests.AddRange(new List<VacationRequest>
+            {
+                new VacationRequest { UserId = TestUserId, VacationTypeId = 1 },
+                new VacationRequest { UserId = TestUserId, VacationTypeId = 1 },
+                new VacationRequest { UserId = "other", VacationTypeId = 1 }
+            });
+            await _context.SaveChangesAsync();
+
+            _mockUserManager.Setup(um => um.GetUserAsync(It.IsAny<ClaimsPrincipal>())).ReturnsAsync(user);
+
+            var controller = CreateController();
+
+            // Act
+            var result = await controller.MyRequests() as ViewResult;
+
+            // Assert
+            Assert.IsNotNull(result);
+            var model = (List<VacationRequest>)result.Model;
+            Assert.AreEqual(2, model.Count); // Трябва да види само своите 2 заявки
+        }
+
+        [TestMethod]
+        public async Task Details_ReturnsView_WithRequest()
+        {
+            // Arrange
+            var user = new ApplicationUser { Id = "u1", FirstName = "Ivan", LastName = "I" };
+            _context.Users.Add(user);
+            var request = new VacationRequest { Id = 1, UserId = "u1", VacationTypeId = 1 };
+            _context.VacationRequests.Add(request);
+            _context.VacationTypes.Add(new VacationType { Id = 1, Name = "Annual" });
+            await _context.SaveChangesAsync();
+
+            var controller = CreateController();
+
+            // Act
+            var result = await controller.Details(1) as ViewResult;
+
+            // Assert
+            Assert.IsNotNull(result);
+            var model = (VacationRequest)result.Model;
+            Assert.AreEqual(1, model.Id);
+        }
+
+        [TestMethod]
+        public async Task CreatePost_ReturnsRedirectToMyRequests_WhenModelIsValid()
+        {
+            // Arrange
+            var user = new ApplicationUser { Id = TestUserId };
+            var model = new VacationRequest
+            {
+                VacationTypeId = 1,
+                StartDate = DateTime.Today.AddDays(1),
+                EndDate = DateTime.Today.AddDays(2)
+            };
+
+            _context.VacationTypes.Add(new VacationType { Id = 1, Name = "Annual" });
+            await _context.SaveChangesAsync();
+
+            _mockUserManager.Setup(um => um.GetUserAsync(It.IsAny<ClaimsPrincipal>())).ReturnsAsync(user);
+            var controller = CreateController();
+
+            // Act
+            var result = await controller.Create(model, null) as RedirectToActionResult;
+
+            // Assert
+            Assert.IsNotNull(result);
+            Assert.AreEqual("MyRequests", result.ActionName);
+            Assert.AreEqual(1, _context.VacationRequests.Count());
+        }
+
+        [TestMethod]
+        public async Task Approve_ReturnsRedirectToAllRequests_WhenApprovedByCEO()
+        {
+            // Arrange
+            var request = new VacationRequest { Id = 1, UserId = "other", IsApproved = false };
+            _context.VacationRequests.Add(request);
+            await _context.SaveChangesAsync();
+
+            var currentUser = new ApplicationUser { Id = TestUserId };
+            _mockUserManager.Setup(um => um.GetUserAsync(It.IsAny<ClaimsPrincipal>())).ReturnsAsync(currentUser);
+            _mockUserManager.Setup(um => um.IsInRoleAsync(currentUser, "CEO")).ReturnsAsync(true);
+
+            var controller = CreateController();
+
+            // Act
+            var result = await controller.Approve(1) as RedirectToActionResult;
+
+            // Assert
+            Assert.IsNotNull(result);
+            Assert.IsTrue(request.IsApproved);
+            Assert.AreEqual("AllRequests", result.ActionName);
+        }
+
+        [TestMethod]
+        public async Task OnLeave_ReturnsView_WithUsersOnLeave()
+        {
+            // Arrange
+            var vType = new VacationType { Id = 1, Name = "Annual" };
+            _context.VacationTypes.Add(vType);
+            _context.VacationRequests.Add(new VacationRequest
+            {
+                IsApproved = true,
+                StartDate = DateTime.Today.AddDays(-1),
+                EndDate = DateTime.Today.AddDays(1),
+                UserId = "u1",
+                VacationTypeId = 1
+            });
+            await _context.SaveChangesAsync();
+
+            var controller = CreateController();
+
+            // Act
+            var result = await controller.OnLeave() as ViewResult;
+
+            // Assert
+            Assert.IsNotNull(result);
+            var model = (List<VacationRequest>)result.Model;
+            Assert.AreEqual(1, model.Count);
+        }
+
+        [TestMethod]
+        public async Task DeleteConfirmed_ReturnsBadRequest_WhenRequestIsApproved()
+        {
+            // Arrange
+            var request = new VacationRequest { Id = 10, IsApproved = true };
+            _context.VacationRequests.Add(request);
+            await _context.SaveChangesAsync();
+
+            var controller = CreateController();
+
+            // Act
+            var result = await controller.DeleteConfirmed(10) as BadRequestObjectResult;
+
+            // Assert
+            Assert.IsNotNull(result);
+            Assert.AreEqual("Cannot delete approved request.", result.Value);
+        }
+
+        // Останалите тестове за Details(null), NotFound и т.н. също ще работят по същия начин...
+    }
+}
