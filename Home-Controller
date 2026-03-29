@@ -1,0 +1,67 @@
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Logging;               // FIX: Changed from Microsoft.Testing...
+using Microsoft.Testing.Platform.Logging; // Added this for [TestClass]
+using Moq;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using VacationManager.Controllers;
+using VacationManager.Models;
+
+// REMOVED: using HomeController.cs; (You cannot "use" a file name in C#)
+
+namespace MS.VacationManagerTest
+{
+    [TestClass]
+    public class HomeControllerTests
+    {
+        private Mock<Microsoft.Extensions.Logging.ILogger<HomeController>> _loggerMock = null!;
+        private HomeController _controller = null!;
+
+        [TestInitialize]
+        public void Setup()
+        {
+            // Now this will correctly map to the ILogger used in your Controller
+            _loggerMock = new Mock<Microsoft.Extensions.Logging.ILogger<HomeController>>();
+            _controller = new HomeController(_loggerMock.Object);
+        }
+
+        [TestMethod]
+        public void Index_Returns_ViewResult()
+        {
+            var result = _controller.Index();
+            Assert.IsInstanceOfType(result, typeof(ViewResult));
+        }
+
+        [TestMethod]
+        public void Privacy_Returns_ViewResult()
+        {
+            var result = _controller.Privacy();
+            Assert.IsInstanceOfType(result, typeof(ViewResult));
+        }
+
+        [TestMethod]
+        public void Error_Returns_ViewResult_With_ErrorViewModel()
+        {
+            var httpContext = new DefaultHttpContext();
+            // We set the TraceIdentifier to simulate a real request ID
+            httpContext.TraceIdentifier = "Test_RequestId";
+
+            _controller.ControllerContext = new ControllerContext
+            {
+                HttpContext = httpContext
+            };
+
+            var result = _controller.Error() as ViewResult;
+
+            Assert.IsNotNull(result);
+            Assert.IsInstanceOfType(result.Model, typeof(ErrorViewModel));
+
+            var model = (ErrorViewModel)result.Model!;
+            Assert.AreEqual("Test_RequestId", model.RequestId);
+        }
+    }
+}
