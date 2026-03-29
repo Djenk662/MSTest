@@ -1,0 +1,204 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Security.Claims;
+using System.Threading.Tasks;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.VisualStudio.TestTools.UnitTesting;
+using Moq;
+using VacationManager.Controllers;
+using VacationManager.Data;
+using VacationManager.Models;
+
+namespace VacationManager.Tests
+{
+    [TestClass]
+    public class ProjectsControllerTests
+    {
+        private VacationManagerDbContext _context = null!;
+        private Mock<UserManager<ApplicationUser>> _mockUserManager = null!;
+        // Използваме константа, за да сме сигурни, че ID-то е еднакво навсякъде
+        private const string TestUserId = "test-user-123";
+
+        [TestInitialize]
+        public void Setup()
+        {
+            var options = new DbContextOptionsBuilder<VacationManagerDbContext>()
+                .UseInMemoryDatabase(databaseName: Guid.NewGuid().ToString())
+                .Options;
+
+            _context = new VacationManagerDbContext(options);
+
+            var store = new Mock<IUserStore<ApplicationUser>>();
+            _mockUserManager = new Mock<UserManager<ApplicationUser>>(
+                store.Object, null!, null!, null!, null!, null!, null!, null!, null!);
+
+            var testUser = new ApplicationUser { Id = TestUserId, UserName = "test@test.com" };
+
+            _mockUserManager.Setup(um => um.GetUserAsync(It.IsAny<ClaimsPrincipal>()))
+                            .ReturnsAsync(testUser);
+
+            // Настройваме GetUserId да връща нашето тестово ID
+            _mockUserManager.Setup(um => um.GetUserId(It.IsAny<ClaimsPrincipal>()))
+                            .Returns(TestUserId);
+        }
+
+        [TestCleanup]
+        public void Cleanup()
+        {
+            _context.Database.EnsureDeleted();
+            _context.Dispose();
+        }
+
+        private void SetupControllerContext(ProjectsController controller)
+        {
+            // Важно: NameIdentifier трябва да съвпада с UserId в базата
+            var claims = new List<Claim>
+            {
+                new Claim(ClaimTypes.NameIdentifier, TestUserId),
+                new Claim(ClaimTypes.Name, "test@test.com")
+            };
+            var identity = new ClaimsIdentity(claims, "TestAuth");
+            var claimsPrincipal = new ClaimsPrincipal(identity);
+
+            controller.ControllerContext = new ControllerContext
+            {
+                HttpContext = new DefaultHttpContext { User = claimsPrincipal }
+            };
+        }
+
+        [TestMethod]
+        public async Task MyRequests_UserHasRequests_ReturnsRequests()
+        {
+            // Arrange
+            // Първо добавяме тип отпуск, за да няма грешки с референциите
+            var vType = new VacationType { Id = 1, Name = "Paid" };
+            _context.VacationTypes.Add(vType);
+
+            var request = new VacationRequest
+            {
+                Id = 1,
+                UserId = TestUserId, // Трябва да е точно "test-user-123"
+                VacationTypeId = 1,
+                StartDate = DateTime.Today,
+                EndDate = DateTime.Today.AddDays(2)
+            };
+
+            _context.VacationRequests.Add(request);
+            await _context.SaveChangesAsync();
+
+            var controller = new ProjectsController(_context, _mockUserManager.Object);
+            SetupControllerContext(controller);
+
+            // Act
+            var result = await controller.MyRequests();
+            var viewResult = result as ViewResult;
+
+            // Assert
+            Assert.IsNotNull(viewResult, "Контролерът не върна ViewResult");
+            var model = viewResult.Model as IEnumerable<VacationRequest>;
+            Assert.IsNotNull(model, "Моделът не е списък от VacationRequest");
+            Assert.AreEqual(1, model.Count(), "Би трябвало да има точно 1 заявка за този потребител");
+        }
+
+        [TestMethod]
+        public async Task Create_Post_InvalidModelState_ReturnsView()
+        {
+            // Arrange
+            var controller = new ProjectsController(_context, _mockUserManager.Object);
+            SetupControllerContext(controller);
+            controller.ModelState.AddModelError("Error", "Sample error");
+
+            // Act
+            var result = await controller.Create(new VacationRequest(), null);
+
+            // Assert
+            Assert.IsInstanceOfType(result, typeof(ViewResult));
+        }
+
+        [TestMethod]
+        public async Task Create_Post_ValidRequest_ReturnsRedirect()
+        {
+            // Arrange
+            _context.VacationTypes.Add(new VacationType { Id = 1, Name = "Paid" });
+            await _context.SaveChangesAsync();
+
+            var controller = new ProjectsController(_context, _mockUserManager.Object);
+            SetupControllerContext(controller);
+
+            var request = new VacationRequest
+            {
+                VacationTypeId = 1,
+                StartDate = DateTime.Today,
+                EndDate = DateTime.Today.AddDays(1)
+            };
+
+            // Act
+            var result = await controller.Create(request, null);
+
+            // Assert
+            Assert.IsInstanceOfType(result, typeof(RedirectToActionResult));
+        }
+
+        [TestMethod]
+        public async Task Edit_Post_RequestNotFound_ReturnsNotFound()
+        {
+            // Arrange
+            var controller = new ProjectsController(_context, _mockUserManager.Object);
+
+            // Act
+            var result = await controller.Edit(new VacationRequest { Id = 999 }, null);
+
+            // Assert
+            Assert.IsInstanceOfType(result, typeof(NotFoundResult));
+        }
+
+        [TestMethod]
+        public async Task Edit_Post_ValidModel_ReturnsRedirect()
+        {
+            // Arrange
+            _context.VacationTypes.Add(new VacationType { Id = 1, Name = "Paid" });
+            var request = new VacationRequest { Id = 5, UserId = TestUserId, VacationTypeId = 1 };
+            _context.VacationRequests.Add(request);
+            await _context.SaveChangesAsync();
+
+            var controller = new ProjectsController(_context, _mockUserManager.Object);
+            SetupControllerContext(controller);
+
+            var updatedRequest = new VacationRequest
+            {
+                Id = 5,
+                VacationTypeId = 1,
+                StartDate = DateTime.Today,
+                EndDate = DateTime.Today.AddDays(1)
+            };
+
+            // Act
+            var result = await controller.Edit(updatedRequest, null);
+
+            // Assert
+            Assert.IsInstanceOfType(result, typeof(RedirectToActionResult));
+        }
+
+        [TestMethod]
+        public async Task DeleteConfirmed_ExistingId_RemovesRequestAndRedirects()
+        {
+            // Arrange
+            var request = new VacationRequest { Id = 10, UserId = TestUserId };
+            _context.VacationRequests.Add(request);
+            await _context.SaveChangesAsync();
+
+            var controller = new ProjectsController(_context, _mockUserManager.Object);
+
+            // Act
+            var result = await controller.DeleteConfirmed(10);
+
+            // Assert
+            Assert.AreEqual(0, _context.VacationRequests.Count());
+            Assert.IsInstanceOfType(result, typeof(RedirectToActionResult));
+        }
+    }
+}
